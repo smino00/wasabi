@@ -8,9 +8,16 @@ use crate::pci::VendorDeviceId;
 use crate::pci::Pci;
 use crate::result::Result;
 
-pub struct NicDriver {
-    nic: Nic,
+pub trait NicDevice {
+    fn initialize(&mut self, accept_all: bool);
+    fn send<T>(&mut self, buf: *const T, length: u16) -> u8;
+    fn receive<T>(&mut self, buf: *const T) -> u16;
 }
+
+pub struct NicDriver {
+    nic: Box<dyn NicDevice>,
+}
+
 impl NicDriver {
     pub fn supports(vp: VendorDeviceId) -> bool {
         const VDI_LIST: [VendorDeviceId; 1] = [
@@ -33,28 +40,40 @@ impl NicDriver {
         let bar0 = pci.try_bar0_mem64(bdf)?;
         info!("[BAR0_NIC]{:?}", bar0);
         bar0.disable_cache();
-
         info!("[NIC] bar0.addr():{:?}", bar0.addr());
         let mmio_base = bar0.addr() as u64;
         info!("[NIC] mmio_base:{}", mmio_base);
 
-        //mmio
-        let mut nic = Nic::new(mmio_base);
+        // MEMO pciで既に確認しているので冗長か
+        let Some(vd) = pci.read_vendor_id_and_device_id(bdf) else {
+            return Err("Failed to read Vendor ID and Device ID");
+        }
 
-        nic.initialize(true);
+        // FIXME もう少しスマートな書き方がありそう
+        if ( vd.vendor, vd.device) == (0x8086, 0x10D3) {
+            let mut nic = NicDeviceE1000E::new(mmio_base);
+            nic.initialize(true);
+            self.nic = Box::new(nic);
+        }
+        else {
+            return Err("Unsupported NIC device");
+        }
 
+        // let regs: = nic::write_register;
+        // spawn_global(Self::run());
+
+        // [TEST] SEND [START]
         let message_buffer = "Hello, World!";
         nic.send_str(message_buffer, message_buffer.len() as u16);
-        // let regs: = nic::write_register;
+        // [TEST] SEND [END]
 
-        // spawn_global(Self::run());
         Ok(())
     }
 }
 
 
 #[derive(Debug)]
-pub struct Nic {
+pub struct NicDeviceE1000E {
     mmio_base: u64,
     t_descriptor: *mut TDescriptor,
     r_descriptor: *mut RDescriptor,
@@ -105,7 +124,7 @@ const RCTL_BAM: u32       = 0x00008000;
 const RDTR_DELAY: u32     = 0x00001000;
 const RADV_DELAY: u32     = 0x00001000;
 
-impl Nic {
+impl NicDevice for NicDeviceE1000E {
 
     pub fn new(mmio_base: u64) -> Self {
         let t_desc: *mut TDescriptor;
